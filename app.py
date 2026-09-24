@@ -373,13 +373,13 @@ with tab_preview:
     fig1.update_yaxes(title_text="T [°C]", row=2, col=1)
     fig1.update_xaxes(title_text="Tijd", row=2, col=1)
     fig1.update_layout(height=520, legend=dict(orientation="h", y=1.02), hovermode="x unified")
-    st.plotly_chart(fig1, width="stretch")
+    st.plotly_chart(fig1, use_container_width=True)
 
 with tab_table1:
     display1 = format_for_display(df1_win, SINGLE_DISPLAY_COLUMNS)
     st.dataframe(
         display1,
-        width="stretch",
+        use_container_width=True,
         hide_index=True,
         height=420,
         column_config=_column_config(display1),
@@ -607,9 +607,9 @@ tab_grafiek, tab_tabel, tab_blokken = st.tabs(
 )
 
 with tab_grafiek:
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, use_container_width=True)
     st.subheader("Verschillen (bestand 1 − bestand 2)")
-    st.plotly_chart(fig_diff, width="stretch")
+    st.plotly_chart(fig_diff, use_container_width=True)
 
 with tab_tabel:
     st.markdown(
@@ -618,7 +618,7 @@ with tab_tabel:
     )
     st.dataframe(
         display_df,
-        width="stretch",
+        use_container_width=True,
         hide_index=True,
         height=520,
         column_config=_column_config(display_df),
@@ -646,7 +646,7 @@ with tab_blokken:
         st.subheader("Tabel verschillen (gestabiliseerd)")
         st.dataframe(
             diff_display,
-            width="stretch",
+            use_container_width=True,
             hide_index=True,
             column_config=_column_config(diff_display),
         )
@@ -662,7 +662,7 @@ with tab_blokken:
         st.subheader("Details per blok")
         st.dataframe(
             block_display,
-            width="stretch",
+            use_container_width=True,
             hide_index=True,
             column_config=_column_config(block_display),
         )
@@ -670,9 +670,9 @@ with tab_blokken:
         st.subheader("Samenvatting per setpoint")
         st.dataframe(
             summary_display,
-            width="stretch",
+            use_container_width=True,
             hide_index=True,
             column_config=_column_config(summary_display),
         )
 
-        st.plotly_chart(fig_blocks, width="stretch")
+        st.plotly_chart(fig_blocks, use_container_width=True)
