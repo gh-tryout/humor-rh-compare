@@ -37,7 +37,7 @@ st.set_page_config(
 st.title("Humor 20 vs dauwpuntsmeter")
 st.caption(
     "Website: upload meetbestanden, kies een tijdspanne, vergelijk RH en temperatuur. "
-    "Ondersteund: Humor CSV, dauwpuntsmeter TXT, sensor-export CSV."
+    "Ondersteund: Humor CSV, dauwpuntsmeter TXT, sensor-export CSV, meetlog CSV (%RV)."
 )
 
 

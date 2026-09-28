@@ -63,6 +63,28 @@ def _sensor_header_row(path: Path) -> int | None:
     return None
 
 
+def _point_log_header_row(path: Path) -> int | None:
+    """Headerrij van een meetlog: Datum, Tijd en %RV/%RH op één regel."""
+    for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            with path.open(encoding=encoding, errors="strict") as handle:
+                for i, line in enumerate(handle):
+                    low = line.lower()
+                    if "datum" in low and "tijd" in low and ("%rv" in low or "%rh" in low):
+                        return i
+                    if i > 120:
+                        break
+            return None
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
+def _is_point_log(path: Path) -> bool:
+    """Meetlog: Datum;Tijd;%RV;℃ (komma als decimaalteken), ook ná een Testo-rapportkop."""
+    return _point_log_header_row(path) is not None
+
+
 def _is_sensor_export(path: Path) -> bool:
     try:
         head = _read_text_head(path).lower()
@@ -119,6 +141,8 @@ def classify_file(path: str | Path) -> str:
     path = Path(path)
     if _is_sensor_export(path):
         return "sensor"
+    if _is_point_log(path):
+        return "meetlog"
 
     df = _read_raw_table(path)
     joined = " ".join(df.columns).lower()
@@ -138,6 +162,13 @@ def classify_file(path: str | Path) -> str:
 def _parse_datetime_series(values: pd.Series) -> pd.Series:
     """Parse datetimes with fixed formats — dateutil fallback crashes on Python 3.14."""
     text = values.astype(str).str.strip()
+    text = text.str.replace(
+        r"^(\d{1,2})-(\d{1,2})-(\d{4})(.*)$",
+        lambda match: (
+            f"{int(match.group(1)):02d}-{int(match.group(2)):02d}-{match.group(3)}{match.group(4)}"
+        ),
+        regex=True,
+    )
     lower = text.str.lower()
     invalid = (
         text.isin(["", "nan", "None", "NaT", "NaN"])
@@ -288,6 +319,61 @@ def _load_sensor_export_raw(path: str | Path) -> pd.DataFrame:
     return out.drop_duplicates(subset=["tijd"]).reset_index(drop=True)
 
 
+def _load_point_log_raw(path: str | Path) -> pd.DataFrame:
+    """Laad meetlog met Datum, Tijd, %RV en ℃. Dauwpuntkolom (℃ dp) blijft buiten de vergelijking."""
+    path = Path(path)
+    header_row = _point_log_header_row(path)
+    if header_row is None:
+        raise ValueError(f"Meetlog mist header Datum / Tijd / %RV: {path.name}")
+
+    last_error: Exception | None = None
+    df: pd.DataFrame | None = None
+    for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            df = pd.read_csv(
+                path,
+                sep=";",
+                skiprows=header_row,
+                encoding=encoding,
+                engine="python",
+                on_bad_lines="skip",
+            )
+            break
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+    if df is None:
+        raise ValueError(f"Kan meetlog niet lezen: {path.name} ({last_error})")
+    df.columns = [str(c).strip().rstrip(";") for c in df.columns]
+    df = df.loc[:, [c for c in df.columns if c and not str(c).lower().startswith("unnamed")]]
+    date_col = _find_column(df, "datum")
+    time_col = _find_column(df, "tijd")
+    rh_col = _find_column(df, "%rv") or _find_column(df, "%rh")
+    temp_col = None
+    for col in df.columns:
+        low = col.lower()
+        if "dp" in low:
+            continue
+        if "℃" in col or "°c" in low or "temp" in low:
+            temp_col = col
+            break
+
+    if date_col is None or time_col is None or date_col == time_col:
+        raise ValueError(f"Meetlog mist datum- of tijdkolom: {Path(path).name}")
+    if temp_col is None or rh_col is None:
+        raise ValueError(f"Meetlog mist temperatuur- of %RV-kolom: {Path(path).name}")
+
+    combined = df[date_col].astype(str).str.strip() + " " + df[time_col].astype(str).str.strip()
+    out = pd.DataFrame(
+        {
+            "tijd": _parse_datetime_series(combined),
+            "t": _to_float(df[temp_col]),
+            "rh": _to_float(df[rh_col]),
+        }
+    )
+    out = out.dropna(subset=["tijd", "t", "rh"]).sort_values("tijd")
+    return out.drop_duplicates(subset=["tijd"]).reset_index(drop=True)
+
+
 def load_instrument_file(path: str | Path) -> tuple[str, pd.DataFrame]:
     """Laad meetbestand als (soort, dataframe met kolommen tijd / t / rh)."""
     kind = classify_file(path)
@@ -297,6 +383,8 @@ def load_instrument_file(path: str | Path) -> tuple[str, pd.DataFrame]:
         return kind, _load_dpm_raw(path)
     if kind == "sensor":
         return kind, _load_sensor_export_raw(path)
+    if kind == "meetlog":
+        return kind, _load_point_log_raw(path)
     raise ValueError(f"Bestandstype niet herkend: {Path(path).name}")
 
 
