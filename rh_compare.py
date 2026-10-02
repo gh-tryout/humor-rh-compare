@@ -437,7 +437,7 @@ def _nearest_join(
     right: pd.DataFrame,
     *,
     on: str,
-    max_delta_seconds: float,
+    max_delta_seconds: float | None = None,
 ) -> pd.DataFrame:
     """Nearest-time join without pandas.merge_asof (crashes on Python 3.14)."""
     if left.empty or right.empty:
@@ -448,7 +448,6 @@ def _nearest_join(
 
     left_ns = left[on].to_numpy(dtype="datetime64[ns]").astype(np.int64)
     right_ns = right[on].to_numpy(dtype="datetime64[ns]").astype(np.int64)
-    tol_ns = int(float(max_delta_seconds) * 1_000_000_000)
 
     idx = np.searchsorted(right_ns, left_ns, side="left")
     idx_lo = np.clip(idx - 1, 0, len(right_ns) - 1)
@@ -458,7 +457,10 @@ def _nearest_join(
     use_hi = delta_hi < delta_lo
     best = np.where(use_hi, idx_hi, idx_lo)
     best_delta = np.where(use_hi, delta_hi, delta_lo)
-    matched = best_delta <= tol_ns
+    if max_delta_seconds is None:
+        matched = np.ones(len(best_delta), dtype=bool)
+    else:
+        matched = best_delta <= int(float(max_delta_seconds) * 1_000_000_000)
 
     if not matched.any():
         return left.iloc[0:0].copy()
@@ -477,7 +479,7 @@ def merge_measurements(
     first: pd.DataFrame,
     second: pd.DataFrame,
     second_offset_seconds: float = 0.0,
-    max_delta_seconds: float = 30.0,
+    max_delta_seconds: float | None = None,
 ) -> pd.DataFrame:
     """Koppel elk punt van bestand 1 aan dichtstbijzijnde punt van bestand 2 (RH + T)."""
     left = first[["tijd", "t", "rh"]].copy().sort_values("tijd")
@@ -513,16 +515,14 @@ def nearest_setpoint(rh: float, tolerance: float) -> float | None:
 def detect_stable_blocks(
     merged: pd.DataFrame,
     rh_tolerance: float = 1.0,
-    settle_minutes: float = 5.0,
-    min_stable_minutes: float = 5.0,
-    end_margin_minutes: float = 2.0,
+    start_before_minutes: float = 20.0,
+    end_before_minutes: float = 2.0,
 ) -> pd.DataFrame:
-    """Vind RH-plateaus op bestand 1 en gemiddel RH/T in stabiele vensters.
+    """Gemiddel RH/T per setpoint, in een venster vóór het volgende setpoint.
 
-    Stabiel venster:
-    - start na ``settle_minutes`` (waarde is dan ingeregeld / stabiel)
-    - eindigt uiterlijk ``end_margin_minutes`` vóór de start van het volgende
-      RH-setpoint (klokken lopen niet synchroon)
+    Het venster loopt van ``start_before_minutes`` tot ``end_before_minutes``
+    vóór de start van het volgende RH-setpoint. Zonder volgend setpoint geldt
+    het einde van het huidige plateau als referentie.
     """
     if merged.empty or "rh_1" not in merged.columns:
         return pd.DataFrame()
@@ -541,8 +541,10 @@ def detect_stable_blocks(
             start = i
 
     blocks: list[dict] = []
-    settle_ns = int(float(settle_minutes) * 60 * 1_000_000_000)
-    end_margin_ns = int(float(end_margin_minutes) * 60 * 1_000_000_000)
+    start_before_ns = int(float(start_before_minutes) * 60 * 1_000_000_000)
+    end_before_ns = int(float(end_before_minutes) * 60 * 1_000_000_000)
+    if start_before_ns <= end_before_ns:
+        return pd.DataFrame()
 
     for p_idx, (i0, i1) in enumerate(plateaus):
         sp = work.at[i0, "setpoint"]
@@ -556,21 +558,19 @@ def detect_stable_blocks(
         t1_ns = _ts_ns(t1)
         duration_min = (t1_ns - t0_ns) / 1_000_000_000 / 60.0
 
-        # Start pas als stabiel (na inregeltijd)
-        stable_start_ns = t0_ns + settle_ns
-        # Eindig uiterlijk 2 min vóór start van het volgende RH-setpoint-blok
-        stable_end_ns = t1_ns
         next_start = None
+        reference_ns = t1_ns
         for q in range(p_idx + 1, len(plateaus)):
             j0, _j1 = plateaus[q]
             next_sp = work.at[j0, "setpoint"]
             if next_sp is None or (isinstance(next_sp, float) and np.isnan(next_sp)):
                 continue
             next_start = work.at[j0, "tijd"]
-            next_start_ns = _ts_ns(next_start)
-            stable_end_ns = min(stable_end_ns, next_start_ns - end_margin_ns)
+            reference_ns = _ts_ns(next_start)
             break
 
+        stable_start_ns = max(t0_ns, reference_ns - start_before_ns)
+        stable_end_ns = min(t1_ns, reference_ns - end_before_ns)
         if stable_end_ns <= stable_start_ns:
             continue
 
@@ -585,8 +585,6 @@ def detect_stable_blocks(
         s0_ns = _ts_ns(stable["tijd"].iloc[0])
         s1_ns = _ts_ns(stable["tijd"].iloc[-1])
         stable_min = (s1_ns - s0_ns) / 1_000_000_000 / 60.0
-        if len(stable) < 3 or stable_min < min_stable_minutes * 0.5:
-            continue
 
         prev_sp = blocks[-1]["setpoint"] if blocks else None
         if prev_sp is None:
@@ -645,10 +643,10 @@ DISPLAY_COLUMNS = [
 BLOCK_COLUMNS = [
     ("setpoint", "RH set [%]"),
     ("richting", "Richting"),
-    ("stabiel_van", "Stabiel van"),
-    ("stabiel_tot", "Stabiel tot"),
+    ("stabiel_van", "Gemiddelde van"),
+    ("stabiel_tot", "Gemiddelde tot"),
     ("volgende_blok", "Volgende setpoint"),
-    ("stabiel_min", "Stabiel [min]"),
+    ("stabiel_min", "Duur [min]"),
     ("n", "n"),
     ("rh_1", "RH 1 [%]"),
     ("rh_2", "RH 2 [%]"),
@@ -664,8 +662,8 @@ BLOCK_COLUMNS = [
 DIFF_COLUMNS = [
     ("setpoint", "RH set [%]"),
     ("richting", "Richting"),
-    ("stabiel_van", "Stabiel van"),
-    ("stabiel_tot", "Stabiel tot"),
+    ("stabiel_van", "Gemiddelde van"),
+    ("stabiel_tot", "Gemiddelde tot"),
     ("n", "n"),
     ("rh_1", "RH 1 [%]"),
     ("rh_2", "RH 2 [%]"),

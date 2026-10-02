@@ -84,8 +84,8 @@ def build_report_html(
     kind2: str,
     range_start,
     range_end,
-    settle_min: float,
-    end_margin: float,
+    start_before: float,
+    end_before: float,
     fig_main: go.Figure,
     fig_diff: go.Figure,
     fig_blocks: go.Figure | None,
@@ -104,10 +104,10 @@ def build_report_html(
     blocks_section = ""
     if not diff_display.empty:
         blocks_section = f"""
-        <h2>Stabiele verschillen</h2>
-        <p>Start na {settle_min:g} min inregeltijd; einde uiterlijk {end_margin:g} min
+        <h2>Verschillen per setpoint</h2>
+        <p>Gemiddelde van {start_before:g} tot {end_before:g} minuten
         vóór het volgende setpoint.</p>
-        <h3>Tabel verschillen (gestabiliseerd)</h3>
+        <h3>Tabel verschillen</h3>
         {_df_to_html_table(diff_display)}
         <h3>Details per blok</h3>
         {_df_to_html_table(block_display)}
@@ -117,7 +117,7 @@ def build_report_html(
         {chart_blocks}
         """
     else:
-        blocks_section = "<h2>Stabiele verschillen</h2><p><em>Geen stabiele blokken gevonden.</em></p>"
+        blocks_section = "<h2>Verschillen per setpoint</h2><p><em>Geen blokken gevonden.</em></p>"
 
     return f"""<!DOCTYPE html>
 <html lang="nl">
@@ -265,33 +265,25 @@ with st.sidebar:
         step=1.0,
         help="Tel deze offset op bij de tijden van bestand 2 als de klokken verschillen.",
     )
-    max_delta_s = st.number_input(
-        "Max. tijdsverschil [s]",
-        value=30.0,
-        min_value=1.0,
-        step=5.0,
-        help="Elk punt van bestand 1 wordt gekoppeld aan het dichtstbijzijnde punt van bestand 2.",
-    )
 
     st.divider()
-    st.header("Stabiele blokken")
+    st.header("Gemiddelde per setpoint")
     rh_tol = st.number_input("RH-tolerantie setpoint [%]", value=1.0, min_value=0.2, step=0.1)
-    settle_min = st.number_input(
-        "Inregeltijd overslaan [min]",
-        value=5.0,
+    start_before = st.number_input(
+        "Start gemiddelde, minuten vóór volgend setpoint",
+        value=20.0,
         min_value=0.0,
         step=1.0,
-        help="Stabiel venster begint pas na deze inregeltijd (waarde is dan stabiel).",
+        help="Het gemiddelde begint zoveel minuten vóór de start van het volgende RH-setpoint.",
     )
-    end_margin = st.number_input(
-        "Einde vóór volgende setpoint [min]",
+    end_before = st.number_input(
+        "Einde gemiddelde, minuten vóór volgend setpoint",
         value=2.0,
         min_value=0.0,
         step=0.5,
-        help="Stabiel venster eindigt uiterlijk zoveel minuten vóór het volgende RH-setpoint "
+        help="Het gemiddelde eindigt zoveel minuten vóór de start van het volgende RH-setpoint "
         "(compensatie voor niet-synchrone klokken).",
     )
-    min_stable = st.number_input("Minimale stabiele duur [min]", value=5.0, min_value=1.0, step=1.0)
 
 
 # --- Bestand 1 ---
@@ -433,7 +425,6 @@ try:
         df1_win,
         df2_in_range,
         second_offset_seconds=0.0,
-        max_delta_seconds=float(max_delta_s),
     )
 except Exception as exc:  # noqa: BLE001
     st.error(f"Koppelen van de metingen is mislukt: {exc}")
@@ -441,24 +432,23 @@ except Exception as exc:  # noqa: BLE001
 
 if merged.empty:
     st.error(
-        "Geen overlappende tijdstippen binnen de max. tijdsverschil-instelling. "
-        "Vergroot het max. tijdsverschil of pas de offset aan."
+        "Geen punten van bestand 2 om aan bestand 1 te koppelen. "
+        "Pas de tijdspanne of de offset aan."
     )
     st.stop()
 
 blocks = detect_stable_blocks(
     merged,
     rh_tolerance=float(rh_tol),
-    settle_minutes=float(settle_min),
-    min_stable_minutes=float(min_stable),
-    end_margin_minutes=float(end_margin),
+    start_before_minutes=float(start_before),
+    end_before_minutes=float(end_before),
 )
 
 info1, info2, info3, info4 = st.columns(4)
 info1.metric("Bestand 1", label1_name)
 info2.metric("Bestand 2", label2_name)
 info3.metric("Gekoppelde punten", f"{len(merged)}")
-info4.metric("Stabiele RH-blokken", f"{len(blocks)}")
+info4.metric("RH-blokken", f"{len(blocks)}")
 
 st.caption(
     f"Tijdspanne: {range_start} → {range_end} · "
@@ -583,8 +573,8 @@ report_html = build_report_html(
     kind2=kind2,
     range_start=range_start,
     range_end=range_end,
-    settle_min=float(settle_min),
-    end_margin=float(end_margin),
+    start_before=float(start_before),
+    end_before=float(end_before),
     fig_main=fig,
     fig_diff=fig_diff,
     fig_blocks=fig_blocks,
@@ -603,7 +593,7 @@ st.download_button(
 )
 
 tab_grafiek, tab_tabel, tab_blokken = st.tabs(
-    ["RH & temperatuur", "Gekoppelde tabel", "Stabiele verschillen"]
+    ["RH & temperatuur", "Gekoppelde tabel", "Verschillen per setpoint"]
 )
 
 with tab_grafiek:
@@ -632,18 +622,18 @@ with tab_tabel:
 
 with tab_blokken:
     st.markdown(
-        "Verschillen (**ΔRH**, **ΔT**) over het **stabiele** deel van elk RH-setpoint van bestand 1:\n"
-        f"- start na **{settle_min:g} min** inregeltijd\n"
-        f"- eindigt uiterlijk **{end_margin:g} min** vóór het volgende setpoint "
+        "Verschillen (**ΔRH**, **ΔT**) als gemiddelde per RH-setpoint van bestand 1:\n"
+        f"- begint **{start_before:g} min** vóór het volgende setpoint\n"
+        f"- eindigt **{end_before:g} min** vóór het volgende setpoint "
         "(klokken niet synchroon)"
     )
     if blocks.empty:
         st.warning(
-            "Geen stabiele blokken gevonden. Verlaag de inregeltijd, de eindmarge, "
-            "of vergroot de RH-tolerantie."
+            "Geen blokken gevonden. Zet de start verder vóór het volgende setpoint "
+            "dan het einde, of vergroot de RH-tolerantie."
         )
     else:
-        st.subheader("Tabel verschillen (gestabiliseerd)")
+        st.subheader("Tabel verschillen")
         st.dataframe(
             diff_display,
             use_container_width=True,
