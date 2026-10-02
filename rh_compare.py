@@ -503,11 +503,15 @@ def merge_measurements(
 
 
 def nearest_setpoint(rh: float, tolerance: float) -> float | None:
-    if pd.isna(rh):
+    try:
+        if rh is None or pd.isna(rh):
+            return None
+        rh_value = float(rh)
+    except (TypeError, ValueError):
         return None
-    idx = int(np.argmin(np.abs(TYPICAL_SETPOINTS - rh)))
+    idx = int(np.argmin(np.abs(TYPICAL_SETPOINTS - rh_value)))
     sp = float(TYPICAL_SETPOINTS[idx])
-    if abs(rh - sp) <= tolerance:
+    if abs(rh_value - sp) <= tolerance:
         return sp
     return None
 
@@ -528,15 +532,17 @@ def detect_stable_blocks(
         return pd.DataFrame()
 
     work = merged.sort_values("tijd").reset_index(drop=True)
-    assigned = [nearest_setpoint(v, rh_tolerance) for v in work["rh_1"]]
+    assigned = [nearest_setpoint(v, rh_tolerance) for v in work["rh_1"].to_numpy()]
     work["setpoint"] = pd.Series(assigned, dtype="object")
 
-    # Ruwe plateaus: opeenvolgende rijen met hetzelfde setpoint
+    # Ruwe plateaus: opeenvolgende rijen met hetzelfde setpoint.
+    # None == None moet waar zijn; pd.NA in een if geeft anders TypeError.
     plateaus: list[tuple[int, int]] = []
     start = 0
     n = len(work)
     for i in range(1, n + 1):
-        if i == n or work.at[i, "setpoint"] != work.at[start, "setpoint"]:
+        changed = i == n or assigned[i] != assigned[start]
+        if changed:
             plateaus.append((start, i))
             start = i
 
@@ -596,11 +602,21 @@ def detect_stable_blocks(
         else:
             richting = "herhaal"
 
+        def _numeric(col: str) -> np.ndarray:
+            return pd.to_numeric(stable[col], errors="coerce").to_numpy(dtype=float)
+
         def mean(col: str) -> float:
-            return float(stable[col].mean())
+            vals = _numeric(col)
+            if vals.size == 0 or np.all(np.isnan(vals)):
+                return float("nan")
+            return float(np.nanmean(vals))
 
         def std(col: str) -> float:
-            return float(stable[col].std(ddof=1)) if len(stable) > 1 else 0.0
+            vals = _numeric(col)
+            vals = vals[~np.isnan(vals)]
+            if vals.size < 2:
+                return 0.0
+            return float(np.std(vals, ddof=1))
 
         blocks.append(
             {

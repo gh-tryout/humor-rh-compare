@@ -65,6 +65,13 @@ def _column_config(df: pd.DataFrame) -> dict:
     return config
 
 
+def _widget_float(value, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _to_py_dt(value) -> datetime:
     ts = pd.Timestamp(value)
     return ts.to_pydatetime().replace(tzinfo=None)
@@ -439,9 +446,9 @@ if merged.empty:
 
 blocks = detect_stable_blocks(
     merged,
-    rh_tolerance=float(rh_tol),
-    start_before_minutes=float(start_before),
-    end_before_minutes=float(end_before),
+    rh_tolerance=_widget_float(rh_tol, 1.0),
+    start_before_minutes=_widget_float(start_before, 20.0),
+    end_before_minutes=_widget_float(end_before, 2.0),
 )
 
 info1, info2, info3, info4 = st.columns(4)
