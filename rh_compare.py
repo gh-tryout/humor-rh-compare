@@ -516,35 +516,81 @@ def nearest_setpoint(rh: float, tolerance: float) -> float | None:
     return None
 
 
+def _rh_span(values: np.ndarray) -> float:
+    clean = values[~np.isnan(values)]
+    if clean.size == 0:
+        return float("nan")
+    return float(np.max(clean) - np.min(clean))
+
+
+def _transition_indices(tijd_ns: np.ndarray, rh: np.ndarray) -> list[int]:
+    """Start van een echte stap: >2 %RH binnen 2 min, na ≥10 min binnen 1 %RH.
+
+    Een ruispiek telt niet, omdat die niet voorafgegaan wordt door tien minuten
+    waarin de meetwaarde binnen 1 procentpunt blijft.
+    """
+    n = len(rh)
+    if n < 3:
+        return []
+    change_ns = int(2 * 60 * 1_000_000_000)
+    stable_ns = int(10 * 60 * 1_000_000_000)
+    end_idx = np.searchsorted(tijd_ns, tijd_ns + change_ns, side="right") - 1
+    start_idx = np.searchsorted(tijd_ns, tijd_ns - stable_ns, side="left")
+    found: list[int] = []
+    last_ns = -1
+    for i in range(n):
+        if last_ns >= 0 and int(tijd_ns[i]) - last_ns < stable_ns:
+            continue
+        j = int(end_idx[i])
+        k = int(start_idx[i])
+        if j <= i or k >= i:
+            continue
+        if int(tijd_ns[i]) - int(tijd_ns[k]) < stable_ns:
+            continue
+        before = rh[k:i]
+        if _rh_span(before) > 1.0:
+            continue
+        # De waarde moet na 2 minuten echt verplaatst zijn. Een piek die
+        # terugvalt telt niet als setpoint.
+        level = float(np.nanmedian(before))
+        after = rh[i : j + 1]
+        after = after[~np.isnan(after)]
+        if after.size == 0 or abs(float(np.median(after)) - level) <= 2.0:
+            continue
+        found.append(i)
+        last_ns = int(tijd_ns[i])
+    return found
+
+
 def detect_stable_blocks(
     merged: pd.DataFrame,
     rh_tolerance: float = 1.0,
     start_before_minutes: float = 20.0,
     end_before_minutes: float = 2.0,
 ) -> pd.DataFrame:
-    """Gemiddel RH/T per setpoint, in een venster vóór het volgende setpoint.
+    """Gemiddel RH/T in een venster vóór het volgende setpoint.
 
-    Het venster loopt van ``start_before_minutes`` tot ``end_before_minutes``
-    vóór de start van het volgende RH-setpoint. Zonder volgend setpoint geldt
-    het einde van het huidige plateau als referentie.
+    Het volgende setpoint begint waar RH, na minstens 10 minuten binnen 1 %RH,
+    binnen 2 minuten meer dan 2 %RH verandert. Het gemiddelde loopt van
+    ``start_before_minutes`` tot ``end_before_minutes`` vóór dat moment.
     """
     if merged.empty or "rh_1" not in merged.columns:
         return pd.DataFrame()
 
     work = merged.sort_values("tijd").reset_index(drop=True)
-    assigned = [nearest_setpoint(v, rh_tolerance) for v in work["rh_1"].to_numpy()]
-    work["setpoint"] = pd.Series(assigned, dtype="object")
+    tijd_ns = work["tijd"].to_numpy(dtype="datetime64[ns]").astype(np.int64)
+    rh = pd.to_numeric(work["rh_1"], errors="coerce").to_numpy(dtype=float)
+    transitions = _transition_indices(tijd_ns, rh)
 
-    # Ruwe plateaus: opeenvolgende rijen met hetzelfde setpoint.
-    # None == None moet waar zijn; pd.NA in een if geeft anders TypeError.
-    plateaus: list[tuple[int, int]] = []
-    start = 0
-    n = len(work)
-    for i in range(1, n + 1):
-        changed = i == n or assigned[i] != assigned[start]
-        if changed:
-            plateaus.append((start, i))
-            start = i
+    # Elk overgangsmoment beëindigt het voorgaande niveau. Het laatste niveau
+    # gebruikt het einde van de reeks als er nog 10 minuten binnen 1 %RH liggen.
+    references = [int(tijd_ns[i]) for i in transitions]
+    if len(tijd_ns):
+        tail = int(tijd_ns[-1])
+        tail_from = int(np.searchsorted(tijd_ns, tail - int(10 * 60 * 1_000_000_000), side="left"))
+        if tail - int(tijd_ns[tail_from]) >= int(10 * 60 * 1_000_000_000) and _rh_span(rh[tail_from:]) <= 1.0:
+            if not references or references[-1] < tail:
+                references.append(tail)
 
     blocks: list[dict] = []
     start_before_ns = int(float(start_before_minutes) * 60 * 1_000_000_000)
@@ -552,45 +598,24 @@ def detect_stable_blocks(
     if start_before_ns <= end_before_ns:
         return pd.DataFrame()
 
-    for p_idx, (i0, i1) in enumerate(plateaus):
-        sp = work.at[i0, "setpoint"]
-        if sp is None or (isinstance(sp, float) and np.isnan(sp)):
-            continue
-        sp = float(sp)
-        block = work.iloc[i0:i1].reset_index(drop=True)
-        t0 = block["tijd"].iloc[0]
-        t1 = block["tijd"].iloc[-1]
-        t0_ns = _ts_ns(t0)
-        t1_ns = _ts_ns(t1)
-        duration_min = (t1_ns - t0_ns) / 1_000_000_000 / 60.0
-
-        next_start = None
-        reference_ns = t1_ns
-        for q in range(p_idx + 1, len(plateaus)):
-            j0, _j1 = plateaus[q]
-            next_sp = work.at[j0, "setpoint"]
-            if next_sp is None or (isinstance(next_sp, float) and np.isnan(next_sp)):
-                continue
-            next_start = work.at[j0, "tijd"]
-            reference_ns = _ts_ns(next_start)
-            break
-
-        stable_start_ns = max(t0_ns, reference_ns - start_before_ns)
-        stable_end_ns = min(t1_ns, reference_ns - end_before_ns)
+    segment_start_ns = int(tijd_ns[0]) if len(tijd_ns) else 0
+    for reference_ns in references:
+        stable_start_ns = max(segment_start_ns, reference_ns - start_before_ns)
+        stable_end_ns = min(reference_ns, reference_ns - end_before_ns)
         if stable_end_ns <= stable_start_ns:
+            segment_start_ns = reference_ns
             continue
 
-        tijd_ns = block["tijd"].to_numpy(dtype="datetime64[ns]").astype(np.int64)
-        idxs = np.flatnonzero(
-            (tijd_ns >= stable_start_ns) & (tijd_ns <= stable_end_ns)
-        ).astype(np.intp)
+        idxs = np.flatnonzero((tijd_ns >= stable_start_ns) & (tijd_ns <= stable_end_ns)).astype(np.intp)
         if idxs.size == 0:
+            segment_start_ns = reference_ns
             continue
 
-        stable = pd.DataFrame({col: block[col].to_numpy().take(idxs) for col in block.columns})
-        s0_ns = _ts_ns(stable["tijd"].iloc[0])
-        s1_ns = _ts_ns(stable["tijd"].iloc[-1])
-        stable_min = (s1_ns - s0_ns) / 1_000_000_000 / 60.0
+        stable = pd.DataFrame({col: work[col].to_numpy().take(idxs) for col in work.columns})
+        level = float(np.nanmedian(rh[idxs]))
+        sp = nearest_setpoint(level, rh_tolerance)
+        if sp is None:
+            sp = round(level, 1)
 
         prev_sp = blocks[-1]["setpoint"] if blocks else None
         if prev_sp is None:
@@ -618,17 +643,20 @@ def detect_stable_blocks(
                 return 0.0
             return float(np.std(vals, ddof=1))
 
+        s0_ns = int(tijd_ns[idxs[0]])
+        s1_ns = int(tijd_ns[idxs[-1]])
+        next_start = None if reference_ns == int(tijd_ns[-1]) else pd.to_datetime(reference_ns, unit="ns")
         blocks.append(
             {
                 "setpoint": sp,
                 "richting": richting,
-                "blok_start": t0,
-                "blok_einde": t1,
+                "blok_start": pd.to_datetime(segment_start_ns, unit="ns"),
+                "blok_einde": pd.to_datetime(reference_ns, unit="ns"),
                 "volgende_blok": next_start,
                 "stabiel_van": stable["tijd"].iloc[0],
                 "stabiel_tot": stable["tijd"].iloc[-1],
-                "blokduur_min": round(duration_min, 1),
-                "stabiel_min": round(stable_min, 1),
+                "blokduur_min": round((reference_ns - segment_start_ns) / 1_000_000_000 / 60.0, 1),
+                "stabiel_min": round((s1_ns - s0_ns) / 1_000_000_000 / 60.0, 1),
                 "n": int(len(stable)),
                 "t_1": mean("t_1"),
                 "rh_1": mean("rh_1"),
@@ -642,6 +670,7 @@ def detect_stable_blocks(
                 "std_d_t": std("d_t"),
             }
         )
+        segment_start_ns = reference_ns
 
     return pd.DataFrame(blocks)
 

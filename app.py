@@ -275,13 +275,20 @@ with st.sidebar:
 
     st.divider()
     st.header("Gemiddelde per setpoint")
-    rh_tol = st.number_input("RH-tolerantie setpoint [%]", value=1.0, min_value=0.2, step=0.1)
+    rh_tol = st.number_input(
+        "RH-tolerantie setpoint [%]",
+        value=1.0,
+        min_value=0.2,
+        step=0.1,
+        help="Het gemiddelde RH wordt aan het dichtstbijzijnde stap-setpoint gekoppeld.",
+    )
     start_before = st.number_input(
         "Start gemiddelde, minuten vóór volgend setpoint",
         value=20.0,
         min_value=0.0,
         step=1.0,
-        help="Het gemiddelde begint zoveel minuten vóór de start van het volgende RH-setpoint.",
+        help="Een volgend setpoint begint waar RH, na minstens 10 minuten binnen 1 %, "
+        "binnen 2 minuten meer dan 2 % verandert. Het gemiddelde start zoveel minuten daarvóór.",
     )
     end_before = st.number_input(
         "Einde gemiddelde, minuten vóór volgend setpoint",
@@ -629,10 +636,11 @@ with tab_tabel:
 
 with tab_blokken:
     st.markdown(
-        "Verschillen (**ΔRH**, **ΔT**) als gemiddelde per RH-setpoint van bestand 1:\n"
-        f"- begint **{start_before:g} min** vóór het volgende setpoint\n"
-        f"- eindigt **{end_before:g} min** vóór het volgende setpoint "
-        "(klokken niet synchroon)"
+        "Verschillen (**ΔRH**, **ΔT**) als gemiddelde per RH-setpoint van bestand 1.\n"
+        "Een volgend setpoint begint waar de RH, na minstens **10 min** binnen **1 %**, "
+        "binnen **2 min** meer dan **2 %** verandert. Ruispieken tellen niet mee.\n"
+        f"- gemiddelde begint **{start_before:g} min** vóór dat moment\n"
+        f"- gemiddelde eindigt **{end_before:g} min** vóór dat moment"
     )
     if blocks.empty:
         st.warning(
